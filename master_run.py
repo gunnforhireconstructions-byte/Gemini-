@@ -2,14 +2,18 @@
 # ==============================================================================
 # TITAN OMEGA CORE: UNIFIED ADMINISTRATIVE GOOGLE-MICROSOFT HYBRID ENGINE
 # Requires: nexus_keys.py (see nexus_keys.py.example)
-# Deps: pkg install python python-cryptography && pip install msal requests google-genai gspread
+# Deps: pkg install python python-cryptography termux-api
+#       pip install msal requests google-genai gspread
 # ==============================================================================
 import os
+import sys
 import json
 import time
+import signal
 import logging
 import subprocess
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 import requests
 from msal import PublicClientApplication
@@ -24,33 +28,25 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(os.path.expanduser("~/master_run.log")),
+        RotatingFileHandler(
+            os.path.expanduser("~/master_run.log"),
+            maxBytes=500_000,
+            backupCount=1,
+        ),
         logging.StreamHandler(),
     ],
 )
 log = logging.getLogger(__name__)
 
-
-def speak(text: str):
-    """Non-blocking TTS via Termux. Silently skipped if termux-tts-speak is unavailable."""
-    try:
-        subprocess.Popen(
-            ["termux-tts-speak", text],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        pass
-
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-GRAPH_ENDPOINT = "https://graph.microsoft.com/v1.0"
-MS_SCOPES      = ["Mail.ReadWrite", "Files.ReadWrite", "User.Read"]
-SHEET_NAME     = "Gunn for Hire Master Operations"
-CREDS_FILE     = os.path.expanduser("~/nexus_creds.json")
-POLL_INTERVAL  = 300
-RETRY_BASE     = 30
+GRAPH_ENDPOINT  = "https://graph.microsoft.com/v1.0"
+MS_SCOPES       = ["Mail.ReadWrite", "Files.ReadWrite", "User.Read"]
+SHEET_NAME      = "Gunn for Hire Master Operations"
+CREDS_FILE      = os.path.expanduser("~/nexus_creds.json")
+RETRY_BASE      = 30
+REQUEST_TIMEOUT = 30  # longer timeout for mobile networks
 
 VICTORIA_RATES = {
     "combined_m": 160.00,
@@ -62,6 +58,66 @@ GSHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+
+# ==============================================================================
+# ANDROID / TERMUX HELPERS
+# ==============================================================================
+def _termux(cmd: list):
+    """Fire-and-forget a termux-* command. Silently ignored if not on Termux."""
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        pass
+
+def speak(text: str):
+    _termux(["termux-tts-speak", text])
+
+def notify(title: str, content: str):
+    _termux([
+        "termux-notification",
+        "--title", title,
+        "--content", content,
+        "--id", "titan_omega",
+        "--ongoing",
+    ])
+
+def notify_clear():
+    _termux(["termux-notification-remove", "titan_omega"])
+
+def vibrate():
+    _termux(["termux-vibrate", "-d", "500"])
+
+def wake_lock():
+    _termux(["termux-wake-lock"])
+
+def wake_unlock():
+    _termux(["termux-wake-unlock"])
+
+def network_up() -> bool:
+    """Returns True if we have a live internet connection."""
+    try:
+        requests.get("https://www.google.com", timeout=5)
+        return True
+    except requests.RequestException:
+        return False
+
+def poll_interval() -> int:
+    """5 min during business hours (7am–7pm), 30 min overnight."""
+    return 300 if 7 <= datetime.now().hour < 19 else 1800
+
+
+# ==============================================================================
+# SIGTERM — Android fires this before force-killing the process
+# ==============================================================================
+def _handle_sigterm(signum, frame):
+    log.info("SIGTERM received — shutting down.")
+    speak("Titan Omega shutting down.")
+    wake_unlock()
+    notify_clear()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 # ==============================================================================
@@ -83,14 +139,12 @@ def backoff(failures: int) -> int:
 # GOOGLE SHEETS LOGGING
 # ==============================================================================
 def connect_sheets():
-    """Opens the master operations sheet using the service account key."""
     if not os.path.exists(CREDS_FILE):
         log.warning("Sheets: %s not found — logging disabled.", CREDS_FILE)
         return None
     try:
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=GSHEETS_SCOPES)
-        client = gspread.authorize(creds)
-        sheet = client.open(SHEET_NAME).sheet1
+        sheet = gspread.authorize(creds).open(SHEET_NAME).sheet1
         log.info("Google Sheets: connected to '%s'.", SHEET_NAME)
         return sheet
     except Exception as e:
@@ -98,7 +152,6 @@ def connect_sheets():
         return None
 
 def log_to_sheet(sheet, subject: str, preview: str, reply: str, status: str = "Processed"):
-    """Appends one row: [timestamp, subject, preview, ai_reply, status]."""
     if not sheet:
         return
     try:
@@ -112,7 +165,6 @@ def log_to_sheet(sheet, subject: str, preview: str, reply: str, status: str = "P
         log.error("Sheets write failed: %s", e)
 
 def log_quote_to_sheet(sheet, meters: float, total: float):
-    """Appends a quote calculation row."""
     if not sheet:
         return
     try:
@@ -213,6 +265,7 @@ def get_ms_token() -> str | None:
     print(f"  Code:   {flow['user_code']}")
     print("==============================================\n")
     speak(f"Microsoft login required. Visit the website and enter code {' '.join(flow['user_code'])}")
+    notify("Titan Omega", f"Microsoft login needed. Code: {flow['user_code']}")
 
     result = app.acquire_token_by_device_flow(flow)
     if "access_token" in result:
@@ -227,21 +280,24 @@ def fetch_emails(token: str) -> list:
     r = requests.get(
         f"{GRAPH_ENDPOINT}/me/messages?$filter=isRead eq false&$top=5",
         headers={"Authorization": f"Bearer {token}"},
-        timeout=15,
+        timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     return r.json().get("value", [])
 
 
 # ==============================================================================
-# MAIN LOOP — auto-reconnects on any failure
+# MAIN LOOP — optimised for Android/Termux
 # ==============================================================================
 def main():
     print("=" * 58)
     print("   TITAN OMEGA CORE — LIVE CROSS-CLOUD ENGINE ONLINE")
     print("=" * 58)
     log.info("Titan Omega starting.")
+
+    wake_lock()
     speak("Titan Omega online. Cross-cloud engine active.")
+    notify("Titan Omega", "Engine online.")
 
     bin_msg = f"Bin schedule: {bin_schedule()}"
     print(f"[*] {bin_msg}")
@@ -255,12 +311,17 @@ def main():
     sheet    = connect_sheets()
     failures = 0
 
-    # Log startup quote table to sheet
     for m in [10, 20, 30, 50]:
         log_quote_to_sheet(sheet, m, victoria_quote(m))
 
     while True:
         try:
+            # Network check — wait silently without burning the retry counter
+            if not network_up():
+                log.warning("No network — waiting 30s.")
+                time.sleep(30)
+                continue
+
             if not google:
                 google = connect_google()
 
@@ -268,6 +329,7 @@ def main():
             if not token:
                 wait = backoff(failures)
                 log.warning("No MS token — retrying in %ds.", wait)
+                speak(f"No Microsoft token. Retrying in {wait} seconds.")
                 time.sleep(wait)
                 failures += 1
                 continue
@@ -276,10 +338,16 @@ def main():
             emails = fetch_emails(token)
             log.info("%d unread email(s).", len(emails))
 
+            ts_str = datetime.now().strftime("%H:%M")
+
             if emails:
-                speak(f"{len(emails)} unread email{'s' if len(emails) != 1 else ''} found.")
+                count = len(emails)
+                speak(f"{count} unread email{'s' if count != 1 else ''} found.")
+                vibrate()
+                notify("Titan Omega", f"{count} new email{'s' if count != 1 else ''} — {ts_str}")
             else:
                 speak("No new emails.")
+                notify("Titan Omega", f"No new emails. Last checked {ts_str}")
 
             for mail in emails:
                 subject = mail.get("subject", "Enquiry")
@@ -296,12 +364,16 @@ def main():
                 print(reply)
                 speak(reply[:400])
 
-            log.info("Sleeping %ds until next poll.", POLL_INTERVAL)
-            time.sleep(POLL_INTERVAL)
+            interval = poll_interval()
+            log.info("Sleeping %ds (next poll %s).", interval,
+                     "business hours" if interval == 300 else "overnight")
+            time.sleep(interval)
 
         except KeyboardInterrupt:
             log.info("Stopped by user.")
             speak("Titan Omega shutting down.")
+            wake_unlock()
+            notify_clear()
             print("\n[*] Titan Omega shut down cleanly.")
             break
 
@@ -309,6 +381,7 @@ def main():
             wait = backoff(failures)
             log.error("Error: %s — reconnecting in %ds.", e, wait)
             speak(f"Connection error. Reconnecting in {wait} seconds.")
+            notify("Titan Omega", f"Error: reconnecting in {wait}s")
             print(f"[!] {e} — reconnecting in {wait}s...")
             time.sleep(wait)
             failures += 1
