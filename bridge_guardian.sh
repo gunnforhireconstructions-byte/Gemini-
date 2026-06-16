@@ -1,13 +1,15 @@
-#!/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
 while true; do
-    echo "[*] SYNC: Pushing Secured Scripts..."
+    echo "[*] SYNC: Pushing secured scripts..."
     git add .
-    git commit -m "Titan Omega: Secured Sync $(date)"
+    git commit -m "Titan Omega: Secured Sync $(date)" 2>/dev/null
     git push origin main
-    
-    if ! pgrep -f "titan_omega.py" > /dev/null; then
-        echo "[!] MOTOR DOWN. Restarting Engine..."
-        nohup python3 titan_omega.py > titan.log 2>&1 &
+
+    # Restart master_run.py inside tmux if the session has died
+    if ! tmux has-session -t titan 2>/dev/null; then
+        echo "[!] Titan session down. Restarting..."
+        tmux new-session -d -s titan "python3 ~/master_run.py"
     fi
+
     sleep 600
 done
