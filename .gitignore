@@ -1,3 +1,4 @@
 nexus_keys.py
 nexus_creds.json
+microsoft_token.json
 *.log

@@ -1,0 +1,20 @@
+# Copy this file to nexus_keys.py and fill in real values.
+# nexus_keys.py is gitignored — never commit the real file.
+
+GEMINI = "your-gemini-api-key"
+OPENAI = ""
+CLAUDE = ""
+
+# Gmail SMTP credentials (use an App Password, not your account password)
+EMAIL = "you@gmail.com"
+KEY = "xxxx xxxx xxxx xxxx"
+
+# Business banking reference (used in quote calculations only — not transmitted)
+BSB = "000000"
+ACC = "00000000"
+
+# Microsoft public client app ID for device-flow auth
+CLIENT_ID = "your-ms-public-client-id"
+
+# Where the MS OAuth token is cached on-device
+MS_TOKEN_CACHE = "/data/data/com.termux/files/home/microsoft_token.json"
