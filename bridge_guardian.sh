@@ -3,7 +3,7 @@ while true; do
     echo "[*] SYNC: Pushing Secured Scripts..."
     git add .
     git commit -m "Titan Omega: Secured Sync $(date)"
-    git push origin main --force
+    git push origin main
     
     if ! pgrep -f "titan_omega.py" > /dev/null; then
         echo "[!] MOTOR DOWN. Restarting Engine..."
