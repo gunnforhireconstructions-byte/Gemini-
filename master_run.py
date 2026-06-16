@@ -46,7 +46,7 @@ MS_SCOPES       = ["Mail.ReadWrite", "Files.ReadWrite", "User.Read"]
 SHEET_NAME      = "Gunn for Hire Master Operations"
 CREDS_FILE      = os.path.expanduser("~/nexus_creds.json")
 RETRY_BASE      = 30
-REQUEST_TIMEOUT = 30  # longer timeout for mobile networks
+REQUEST_TIMEOUT = 30
 
 VICTORIA_RATES = {
     "combined_m": 160.00,
@@ -64,7 +64,6 @@ GSHEETS_SCOPES = [
 # ANDROID / TERMUX HELPERS
 # ==============================================================================
 def _termux(cmd: list):
-    """Fire-and-forget a termux-* command. Silently ignored if not on Termux."""
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
@@ -95,7 +94,6 @@ def wake_unlock():
     _termux(["termux-wake-unlock"])
 
 def network_up() -> bool:
-    """Returns True if we have a live internet connection."""
     try:
         requests.get("https://www.google.com", timeout=5)
         return True
@@ -103,12 +101,11 @@ def network_up() -> bool:
         return False
 
 def poll_interval() -> int:
-    """5 min during business hours (7am–7pm), 30 min overnight."""
     return 300 if 7 <= datetime.now().hour < 19 else 1800
 
 
 # ==============================================================================
-# SIGTERM — Android fires this before force-killing the process
+# SIGTERM
 # ==============================================================================
 def _handle_sigterm(signum, frame):
     log.info("SIGTERM received — shutting down.")
@@ -285,9 +282,34 @@ def fetch_emails(token: str) -> list:
     r.raise_for_status()
     return r.json().get("value", [])
 
+def send_reply(token: str, mail_id: str, reply_text: str) -> bool:
+    """Sends reply to a message and marks it as read. Returns True on success."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    r = requests.post(
+        f"{GRAPH_ENDPOINT}/me/messages/{mail_id}/reply",
+        headers=headers,
+        json={"comment": reply_text},
+        timeout=REQUEST_TIMEOUT,
+    )
+    if r.status_code not in (200, 202):
+        log.error("Reply send failed (%s): %s", r.status_code, r.text)
+        return False
+
+    # Mark as read so it won't be picked up next poll
+    requests.patch(
+        f"{GRAPH_ENDPOINT}/me/messages/{mail_id}",
+        headers=headers,
+        json={"isRead": True},
+        timeout=REQUEST_TIMEOUT,
+    )
+    return True
+
 
 # ==============================================================================
-# MAIN LOOP — optimised for Android/Termux
+# MAIN LOOP
 # ==============================================================================
 def main():
     print("=" * 58)
@@ -316,7 +338,6 @@ def main():
 
     while True:
         try:
-            # Network check — wait silently without burning the retry counter
             if not network_up():
                 log.warning("No network — waiting 30s.")
                 time.sleep(30)
@@ -337,7 +358,6 @@ def main():
             failures = 0
             emails = fetch_emails(token)
             log.info("%d unread email(s).", len(emails))
-
             ts_str = datetime.now().strftime("%H:%M")
 
             if emails:
@@ -350,19 +370,29 @@ def main():
                 notify("Titan Omega", f"No new emails. Last checked {ts_str}")
 
             for mail in emails:
+                mail_id = mail.get("id", "")
                 subject = mail.get("subject", "Enquiry")
                 preview = mail.get("bodyPreview", "")
                 log.info("Processing: %s", subject)
                 speak(f"Processing email: {subject}")
 
                 reply = gemini_reply(google, subject, preview)
-                log_to_sheet(sheet, subject, preview, reply)
 
                 print(f"\n{'─' * 54}")
                 print(f"  {subject}")
                 print(f"{'─' * 54}")
                 print(reply)
                 speak(reply[:400])
+
+                if send_reply(token, mail_id, reply):
+                    log.info("Reply sent: %s", subject)
+                    speak(f"Reply sent to {subject}")
+                    notify("Titan Omega", f"Replied: {subject}")
+                    log_to_sheet(sheet, subject, preview, reply, status="Replied")
+                else:
+                    log.error("Reply failed: %s", subject)
+                    speak(f"Failed to send reply for {subject}")
+                    log_to_sheet(sheet, subject, preview, reply, status="Reply Failed")
 
             interval = poll_interval()
             log.info("Sleeping %ds (next poll %s).", interval,
@@ -381,7 +411,7 @@ def main():
             wait = backoff(failures)
             log.error("Error: %s — reconnecting in %ds.", e, wait)
             speak(f"Connection error. Reconnecting in {wait} seconds.")
-            notify("Titan Omega", f"Error: reconnecting in {wait}s")
+            notify("Titan Omega", f"Error — reconnecting in {wait}s")
             print(f"[!] {e} — reconnecting in {wait}s...")
             time.sleep(wait)
             failures += 1
