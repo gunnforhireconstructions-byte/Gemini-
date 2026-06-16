@@ -8,6 +8,7 @@ import os
 import json
 import time
 import logging
+import subprocess
 from datetime import datetime
 
 import requests
@@ -28,6 +29,18 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+
+def speak(text: str):
+    """Non-blocking TTS via Termux. Silently skipped if termux-tts-speak is unavailable."""
+    try:
+        subprocess.Popen(
+            ["termux-tts-speak", text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        pass
 
 # ==============================================================================
 # CONFIGURATION
@@ -199,6 +212,7 @@ def get_ms_token() -> str | None:
     print(f"  Visit:  {flow['verification_uri']}")
     print(f"  Code:   {flow['user_code']}")
     print("==============================================\n")
+    speak(f"Microsoft login required. Visit the website and enter code {' '.join(flow['user_code'])}")
 
     result = app.acquire_token_by_device_flow(flow)
     if "access_token" in result:
@@ -227,8 +241,12 @@ def main():
     print("   TITAN OMEGA CORE — LIVE CROSS-CLOUD ENGINE ONLINE")
     print("=" * 58)
     log.info("Titan Omega starting.")
+    speak("Titan Omega online. Cross-cloud engine active.")
 
-    print(f"[*] Bin schedule: {bin_schedule()}")
+    bin_msg = f"Bin schedule: {bin_schedule()}"
+    print(f"[*] {bin_msg}")
+    speak(bin_msg)
+
     for m in [10, 20, 30, 50]:
         print(f"[*] Quote {m}m = ${victoria_quote(m):,.2f} AUD")
     print()
@@ -258,10 +276,16 @@ def main():
             emails = fetch_emails(token)
             log.info("%d unread email(s).", len(emails))
 
+            if emails:
+                speak(f"{len(emails)} unread email{'s' if len(emails) != 1 else ''} found.")
+            else:
+                speak("No new emails.")
+
             for mail in emails:
                 subject = mail.get("subject", "Enquiry")
                 preview = mail.get("bodyPreview", "")
                 log.info("Processing: %s", subject)
+                speak(f"Processing email: {subject}")
 
                 reply = gemini_reply(google, subject, preview)
                 log_to_sheet(sheet, subject, preview, reply)
@@ -270,18 +294,21 @@ def main():
                 print(f"  {subject}")
                 print(f"{'─' * 54}")
                 print(reply)
+                speak(reply[:400])
 
             log.info("Sleeping %ds until next poll.", POLL_INTERVAL)
             time.sleep(POLL_INTERVAL)
 
         except KeyboardInterrupt:
             log.info("Stopped by user.")
+            speak("Titan Omega shutting down.")
             print("\n[*] Titan Omega shut down cleanly.")
             break
 
         except Exception as e:
             wait = backoff(failures)
             log.error("Error: %s — reconnecting in %ds.", e, wait)
+            speak(f"Connection error. Reconnecting in {wait} seconds.")
             print(f"[!] {e} — reconnecting in {wait}s...")
             time.sleep(wait)
             failures += 1
